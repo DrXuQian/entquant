@@ -12,6 +12,7 @@ from .nvfp4 import (
     quantize_weight_absmax_nvfp4,
     unpack_nvfp4_codes,
 )
+from .nvfp4_export import export_nvfp4_checkpoint, list_nvfp4_weight_prefixes
 from .nvfp4_optimizer import (
     NVFP4EntQuantConfig,
     NVFP4EntQuantOptimizationReport,
@@ -32,7 +33,9 @@ __all__ = [
     "absmax_actual_scales",
     "encode_actual_scales",
     "entquant_l1_regularizer",
+    "export_nvfp4_checkpoint",
     "fp4_codes_to_values",
+    "list_nvfp4_weight_prefixes",
     "optimize_nvfp4_tensor_entquant",
     "pack_nvfp4_codes",
     "quantize_to_fp4_codes",

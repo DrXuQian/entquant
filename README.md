@@ -213,6 +213,24 @@ uv run python scripts/quickstart_nvfp4.py
 This path is currently tensor-level and experimental. It does not add runtime
 compression or checkpoint export integration yet.
 
+Template-based final checkpoint export:
+
+```bash
+uv run python scripts/export_nvfp4_checkpoint.py \
+  --full-precision-model-dir /path/to/Qwen3-4B \
+  --template-nvfp4-dir /path/to/Qwen3-4B-NVFP4 \
+  --output-dir /path/to/Qwen3-4B-NVFP4-entquant \
+  --variant entquant_exact \
+  --reg-param 0.05 \
+  --device cpu
+```
+
+This exporter:
+- reads full-precision weights from the source model
+- copies config/tokenizer/layout from the template NVFP4 checkpoint
+- re-quantizes selected NVFP4 weight tensors
+- writes a final checkpoint directory plus `nvfp4_export_report.json`
+
 ## 📬 Contact
 
 Feel free to reach out to us via GitHub issues or email! <br>
