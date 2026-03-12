@@ -191,6 +191,28 @@ Design notes:
 - **nvCOMP ANS** compression with on-the-fly GPU decompression: compressed weights are stored as byte buffers and
   decompressed into a shared device buffer just before each block's forward pass.
 
+## 🧪 Experimental NVFP4 Prototype
+
+This repo now also contains an experimental, self-contained NVFP4 path under
+[`entquant/quantization/nvfp4.py`](entquant/quantization/nvfp4.py) and
+[`entquant/quantization/nvfp4_optimizer.py`](entquant/quantization/nvfp4_optimizer.py).
+
+Scope of this prototype:
+
+- Standard NVFP4 E2M1 codebook
+- 16-weight block scaling with FP8 E4M3 encoded block scales
+- Data-free EntQuant-style offline scale optimization
+- Optional `entquant_soft` variant with a soft-code entropy regularizer
+
+Minimal example:
+
+```bash
+uv run python scripts/quickstart_nvfp4.py
+```
+
+This path is currently tensor-level and experimental. It does not add runtime
+compression or checkpoint export integration yet.
+
 ## 📬 Contact
 
 Feel free to reach out to us via GitHub issues or email! <br>
