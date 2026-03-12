@@ -16,6 +16,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import shutil
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -169,14 +170,25 @@ def export_nvfp4_checkpoint(
     if max_layers > 0:
         prefixes = prefixes[:max_layers]
 
+    print(
+        f"Found {len(prefixes)} NVFP4 weight tensors to export from {full_precision_model_dir}",
+        flush=True,
+    )
+
     reports: list[dict[str, Any]] = []
     modified_tensors: dict[str, torch.Tensor] = {}
 
     with safe_open(str(template_safetensors), framework="pt", device="cpu") as template_handle:
         metadata = template_handle.metadata()
         with ShardedTensorLoader(full_precision_model_dir) as fp_loader:
-            for prefix in prefixes:
+            for index, prefix in enumerate(prefixes, start=1):
+                start_time = time.perf_counter()
                 weight = fp_loader.get_tensor(prefix + ".weight").to(torch.float32)
+                print(
+                    f"[{index}/{len(prefixes)}] exporting {prefix} shape={tuple(weight.shape)} "
+                    f"num_weights={weight.numel()}",
+                    flush=True,
+                )
                 optimized = optimize_nvfp4_tensor_entquant(weight, config=config)
                 quantized = optimized.quantized
                 modified_tensors[prefix + ".weight_packed"] = quantized.packed.cpu()
@@ -195,17 +207,29 @@ def export_nvfp4_checkpoint(
                         "optimized_scale_std": optimized.report.optimized_scale_std,
                     }
                 )
+                elapsed_s = time.perf_counter() - start_time
+                print(
+                    f"[{index}/{len(prefixes)}] done {prefix} in {elapsed_s:.1f}s "
+                    f"scale_mean={optimized.report.optimized_scale_mean:.6f} "
+                    f"scale_std={optimized.report.optimized_scale_std:.6f}",
+                    flush=True,
+                )
+                if str(config.device).startswith("cuda") and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             state_dict: dict[str, torch.Tensor] = {}
             for key in template_handle.keys():
                 state_dict[key] = modified_tensors.get(key, template_handle.get_tensor(key))
 
+    print(f"Saving {len(state_dict)} tensors with max_shard_size={max_shard_size}", flush=True)
     shard_names = _save_sharded_state_dict(
         output_dir=output_dir,
         state_dict=state_dict,
         metadata=metadata,
         max_shard_size=max_shard_size,
     )
+    for shard_name in shard_names:
+        print(f"Wrote shard: {output_dir / shard_name}", flush=True)
 
     summary = {
         "full_precision_model_dir": str(full_precision_model_dir),
@@ -218,4 +242,5 @@ def export_nvfp4_checkpoint(
         "max_shard_size": str(max_shard_size),
     }
     (output_dir / "nvfp4_export_report.json").write_text(json.dumps(summary, indent=2))
+    print(f"Export complete -> {output_dir}", flush=True)
     return summary
