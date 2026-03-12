@@ -21,6 +21,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from huggingface_hub import split_torch_state_dict_into_shards
 from safetensors import safe_open
@@ -28,11 +29,72 @@ from safetensors.torch import save_file
 
 from .nvfp4_optimizer import NVFP4EntQuantConfig, optimize_nvfp4_tensor_entquant
 
+CHUNK_SIZE_BYTES = 32 * 1024
+
 
 def _match_any(name: str, patterns: list[str]) -> bool:
     if not patterns:
         return True
     return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+
+
+def compute_entropy_bits(data: np.ndarray) -> float:
+    if data.size == 0:
+        return 0.0
+    counts = np.bincount(data.reshape(-1), minlength=256).astype(np.float64)
+    probs = counts[counts > 0] / float(data.size)
+    return float(-(probs * np.log2(probs)).sum())
+
+
+def compute_nvfp4_compression_rate(weight_packed: np.ndarray, chunk_size_bytes: int = CHUNK_SIZE_BYTES) -> dict[str, float]:
+    flat = weight_packed.reshape(-1)
+    if flat.size == 0:
+        return {
+            "mean_entropy_bits": 0.0,
+            "std_entropy_bits": 0.0,
+            "compression_rate": 0.0,
+            "compressed_size_ratio": 0.0,
+            "n_chunks": 0.0,
+        }
+
+    n_chunks = flat.size // chunk_size_bytes
+    if n_chunks == 0:
+        chunks = [flat[:chunk_size_bytes]]
+    else:
+        chunks = [flat[i * chunk_size_bytes : (i + 1) * chunk_size_bytes] for i in range(n_chunks)]
+
+    entropies = []
+    for chunk in chunks:
+        even_bytes = chunk[0::2]
+        odd_bytes = chunk[1::2]
+        h_even = compute_entropy_bits(even_bytes)
+        h_odd = compute_entropy_bits(odd_bytes)
+        entropies.append((h_even + h_odd) / 2.0)
+
+    mean_entropy = float(np.mean(entropies))
+    std_entropy = float(np.std(entropies))
+    compressed_ratio = mean_entropy / 8.0
+    return {
+        "mean_entropy_bits": mean_entropy,
+        "std_entropy_bits": std_entropy,
+        "compression_rate": float(1.0 - compressed_ratio),
+        "compressed_size_ratio": float(compressed_ratio),
+        "n_chunks": float(len(entropies)),
+    }
+
+
+def _weighted_average(reports: list[dict[str, Any]], field: str) -> float | None:
+    total_weight = 0
+    total = 0.0
+    for report in reports:
+        if field not in report:
+            continue
+        num_weights = int(report["num_weights"])
+        total_weight += num_weights
+        total += num_weights * float(report[field])
+    if total_weight == 0:
+        return None
+    return total / total_weight
 
 
 def list_nvfp4_weight_prefixes(
@@ -194,6 +256,8 @@ def export_nvfp4_checkpoint(
                 modified_tensors[prefix + ".weight_packed"] = quantized.packed.cpu()
                 modified_tensors[prefix + ".weight_scale"] = quantized.encoded_scale.cpu()
                 modified_tensors[prefix + ".weight_global_scale"] = quantized.encoded_global_scale.reshape(1).cpu()
+                mse = torch.mean((quantized.dequantized - weight) ** 2).item()
+                compression_stats = compute_nvfp4_compression_rate(quantized.packed.cpu().numpy())
                 reports.append(
                     {
                         "layer": prefix,
@@ -203,6 +267,9 @@ def export_nvfp4_checkpoint(
                         "reg_param": config.reg_param,
                         "soft_param": config.soft_param,
                         "block_chunk_size": config.block_chunk_size,
+                        "mse": mse,
+                        "mean_entropy_bits": compression_stats["mean_entropy_bits"],
+                        "compression_rate": compression_stats["compression_rate"],
                         "optimized_scale_mean": optimized.report.optimized_scale_mean,
                         "optimized_scale_std": optimized.report.optimized_scale_std,
                     }
@@ -210,6 +277,9 @@ def export_nvfp4_checkpoint(
                 elapsed_s = time.perf_counter() - start_time
                 print(
                     f"[{index}/{len(prefixes)}] done {prefix} in {elapsed_s:.1f}s "
+                    f"mse={mse:.6e} "
+                    f"entropy={compression_stats['mean_entropy_bits']:.4f}bit "
+                    f"comp={compression_stats['compression_rate'] * 100:.2f}% "
                     f"scale_mean={optimized.report.optimized_scale_mean:.6f} "
                     f"scale_std={optimized.report.optimized_scale_std:.6f}",
                     flush=True,
@@ -237,6 +307,11 @@ def export_nvfp4_checkpoint(
         "output_dir": str(output_dir),
         "config": asdict(config),
         "num_modified_layers": len(prefixes),
+        "aggregate": {
+            "weighted_mse": _weighted_average(reports, "mse"),
+            "weighted_mean_entropy_bits": _weighted_average(reports, "mean_entropy_bits"),
+            "weighted_compression_rate": _weighted_average(reports, "compression_rate"),
+        },
         "layers": reports,
         "shards": shard_names,
         "max_shard_size": str(max_shard_size),
